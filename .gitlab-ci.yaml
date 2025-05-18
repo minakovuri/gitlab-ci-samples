@@ -1,0 +1,110 @@
+image: node:20
+
+install:
+  stage: install
+  cache:
+    key:
+      files:
+        - package-lock.json
+    paths:
+        - .npm/
+  script:
+    - npm ci --cache .npm --prefer-offline --no-audit
+  artifacts:
+    paths:
+      - node_modules
+
+lint:
+  stage: checks
+  needs: [ "install" ]
+  script:
+    - npm run lint
+
+typecheck:
+  stage: checks
+  needs: [ "install" ]
+  script:
+    - npm run tsc
+
+test:
+  stage: checks
+  needs: [ "install" ]
+  script:
+    - npm run test
+
+build bundle:
+  stage: build
+  script:
+    - npm run build
+  artifacts:
+    paths:
+      - dist
+  needs: [ "install" ]
+
+.build_docker_image:
+  image: ubuntu
+  before_script:
+    - # Установка kaniko
+  before_script:
+    - |
+    FROM nginx:1.26.2-alpine
+    COPY dist/ /usr/share/nginx/html
+    ' > Dockerfile
+  script:
+    - /kaniko/executor
+      --destination "artifactory.domain.ru/${CI_PROJECT_NAME}:${IMAGE_TAG_PREFIX}-${CI_COMMIT_SHA}" 
+
+create docker image:
+  stage: deploy
+  extends:
+    - .build_docker_image
+  needs: ["build bundle"]
+
+.deploy_docker_image:
+  image: ubuntu
+  before_script:
+    - # Установка helm
+  script:
+    - helm upgrade
+      --namespace "${NAMESPACE_NAME}»
+      # Переменные нужного кластера  
+      image="artifactory.domain.ru/${CI_PROJECT_NAME}:${IMAGE_TAG_PREFIX}-${CI_COMMIT_SHA}"
+     
+deploy:
+  stage: deploy
+  extends:
+    - .deploy_docker_image
+  needs: [ "create docker image" ]
+
+.rollback_docker_image:
+  image: ubuntu
+  before_script:
+    - # Установка helm 
+  script:
+    - helm rollback ${CI_PROJECT_NAME} --namespace ${NAMESPACE_NAME}
+
+rollback:
+  stage: rollback
+  extends:
+    - .rollback_docker_image
+  needs: [ "deploy" ]
+
+create release tag:
+  image: release-cli
+  script:
+    - |
+      ...
+      export NEXT_RELEASE_TAG=$(node -p "
+        const prevTag = '$PREVIOUS_RELEASE_TAG' || 0
+        (prevTag + 1)
+      ")
+  stage: tag
+  allow_failure: true   
+
+upload to s3:
+  stage: deploy
+  image: amazon/aws-cli
+  script:
+    - aws s3 sync dist s3://example-app/ --exclude 'index.html'
+  needs: ["build bundle"]
+
